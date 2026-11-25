@@ -23,7 +23,7 @@ Get these from the conversation. Ask only for what is missing and cannot be work
 | input | default |
 |---|---|
 | student harness + model | must be named by the user. Check that it answers before going further (step 1) |
-| reference session | the current session: `scripts/extract_session.py --current claude --cwd <dir>` (or `codex`, `omp`) |
+| reference session | the current session: `scripts/extract_session.py --current claude --cwd <dir>` (or `codex`, `omp`, `pi`) |
 | task prompt | the first user message of the reference, verbatim. Do not improve it: the student gets the same prompt |
 | starting state | the git commit the reference started from (`git rev-list -1 --before=<session start> HEAD`), or `empty` |
 | where the reference's result lives | the reference's working directory |
@@ -98,6 +98,7 @@ weaker than you, often has a shorter usable context, and follows text literally.
 
 ```
 python3 scripts/distill.py trial runs/<task> -k 3        # iteration N, 3 trials in tmux
+# (or pass --sync instead of tmux when running inside a sandboxed/reaping shell)
 python3 scripts/distill.py status runs/<task>            # tmux attach -t distill-<task> to watch
 python3 scripts/distill.py wait runs/<task> --timeout 540 # repeat until all trials exit
 ```

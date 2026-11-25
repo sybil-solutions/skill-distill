@@ -5,11 +5,12 @@ Supported logs (auto-detected):
   claude      Claude Code transcript   ~/.claude/projects/<slug>/<session>.jsonl
   codex       Codex rollout            ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
   codex-exec  `codex exec --json` stdout
-  omp         oh-my-pi / pi session    ~/.omp/agent/sessions/<slug>/*.jsonl
+  omp         oh-my-pi session         ~/.omp/agent/sessions/<slug>/*.jsonl
+  pi          pi coding agent session  ~/.pi/agent/sessions/<slug>/*.jsonl
 
 Usage:
   extract_session.py LOG [-o reference.md] [--json reference.json]
-  extract_session.py --current claude|codex|omp --cwd DIR [-o ...]   # newest session for DIR
+  extract_session.py --current claude|codex|omp|pi --cwd DIR [-o ...]   # newest session for DIR
 
 System, developer and harness-injected text (AGENTS.md, CLAUDE.md, <system-reminder>, environment
 context) is dropped: it is private to the machine and is not part of what the agent did.
@@ -39,13 +40,14 @@ def clean_user(text):
 
 def read_jsonl(path):
     out = []
-    for line in open(path, encoding="utf-8", errors="replace"):
-        line = line.strip()
-        if line:
-            try:
-                out.append(json.loads(line))
-            except json.JSONDecodeError:
-                pass
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
     return out
 
 
@@ -242,10 +244,17 @@ def current(kind, cwd):
         cands = glob.glob(str(home / ".claude/projects" / slug / "*.jsonl"))
     elif kind == "omp":
         cands = glob.glob(str(home / ".omp/agent/sessions/*/*.jsonl"))
-        cands = [c for c in cands if _first_cwd(c) == cwd]
+        cands = [c for c in cands if os.path.exists(c) and _first_cwd(c) == cwd]
+    elif kind == "pi":
+        cands = glob.glob(str(home / ".pi/agent/sessions/*/*.jsonl"))
+        cands = [c for c in cands if os.path.exists(c) and _first_cwd(c) == cwd]
     else:
-        cands = sorted(glob.glob(str(home / ".codex/sessions/*/*/*/rollout-*.jsonl")), key=os.path.getmtime)[-200:]
+        cands = sorted(
+            (c for c in glob.glob(str(home / ".codex/sessions/*/*/*/rollout-*.jsonl")) if os.path.exists(c)),
+            key=os.path.getmtime,
+        )[-200:]
         cands = [c for c in cands if _first_cwd(c) == cwd]
+    cands = [c for c in cands if os.path.exists(c)]
     if not cands:
         raise SystemExit(f"no {kind} session found for {cwd}")
     return max(cands, key=os.path.getmtime)
@@ -267,7 +276,7 @@ def _first_cwd(path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("log", nargs="?")
-    ap.add_argument("--current", choices=["claude", "codex", "omp"])
+    ap.add_argument("--current", choices=["claude", "codex", "omp", "pi"])
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--format", choices=list(PARSERS))
     ap.add_argument("-o", "--out")

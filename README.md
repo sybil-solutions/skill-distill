@@ -67,7 +67,7 @@ students work with `tmux attach -t distill-<task>`.
 | omp (oh-my-pi) | tested |
 | Codex CLI | tested as the teacher; as a student needs a provider in `STUDENT_ARGS` |
 | Claude Code | written; open models need `ANTHROPIC_BASE_URL` to an Anthropic-compatible server |
-| pi | written, untested |
+| pi | tested |
 | opencode | written, untested; its JSON log has no parser in `extract_session.py` yet |
 
 ## License
