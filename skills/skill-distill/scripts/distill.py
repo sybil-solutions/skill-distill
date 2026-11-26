@@ -97,8 +97,10 @@ def cmd_init(a):
     else:
         path, _, ref = a.base.partition("@")
         path = str(Path(path).resolve())
-        ref = ref or sh(["git", "rev-parse", "HEAD"], cwd=path).stdout.strip()
-        base = {"kind": "git", "path": path, "ref": ref}
+        commit = sh(["git", "rev-parse", "--verify", f"{ref or 'HEAD'}^{{commit}}"], cwd=path)
+        if commit.returncode:
+            raise SystemExit(f"invalid starting state: {commit.stderr.strip()}")
+        base = {"kind": "git", "path": path, "ref": commit.stdout.strip()}
     name = a.name or "reproduce-" + run.name
     cfg = {"created": now(), "name": name, "adapter": adapter, "model": model,
            "student_args": a.student_args or "", "env": dict(kv.split("=", 1) for kv in a.env or []),
@@ -109,7 +111,7 @@ def cmd_init(a):
         shutil.copy(a.prompt, run / "prompt.md")
     (run / "reference").mkdir(exist_ok=True)
     if a.reference:
-        r = sh([sys.executable, str(EXTRACT), a.reference, "-o", str(run / "reference/reference.md"),
+        r = sh([sys.executable, str(EXTRACT), a.reference, "--compact", "-o", str(run / "reference/reference.md"),
                 "--json", str(run / "reference/reference.json")])
         print(r.stdout.strip() or r.stderr.strip())
     skill = run / "skill"
@@ -126,16 +128,24 @@ def cmd_trial(a):
     cfg = load(run)
     n = a.iter or last_iter(run) + 1
     it = iter_dir(run, n)
-    if it.exists():
-        raise SystemExit(f"{it} exists; use a new --iter")
-    shutil.copytree(run / "skill", it / "skill")
+    if a.extend:
+        if a.iter is None or not (it / "skill").is_dir():
+            raise SystemExit("--extend requires --iter for an existing iteration")
+        first = max((int(t.name[1:]) for t in trial_dirs(run, n)), default=0) + 1
+    else:
+        if it.exists():
+            raise SystemExit(f"{it} exists; use --extend or a new --iter")
+        shutil.copytree(run / "skill", it / "skill")
+        first = 1
     session = cfg["tmux"]
     if sh(["tmux", "has-session", "-t", session], timeout=10).returncode:
         sh(["tmux", "new-session", "-d", "-s", session, "-n", "ledger", f"tail -F {run}/ledger.jsonl"], timeout=10)
     prompt = (run / "prompt.md").read_text().rstrip() + SKILL_POINTER.format(name=cfg["name"])
-    for k in range(1, a.k + 1):
+    for k in range(first, first + a.k):
         t = it / f"t{k}"
         make_workspace(cfg, t / "workspace")
+        (t / "base.txt").write_text(sh(["git", "rev-parse", "HEAD"], cwd=t / "workspace",
+                                      check=True).stdout)
         dest = t / "workspace" / ".skill" / cfg["name"]
         shutil.copytree(it / "skill", dest)
         with open(t / "workspace" / ".git" / "info" / "exclude", "a") as f:
@@ -163,7 +173,8 @@ echo "== trial done (exit $(cat {t}/exit_code)) =="
 
 
 def trial_dirs(run, n):
-    return sorted(p for p in iter_dir(run, n).glob("t*") if p.is_dir())
+    return sorted((p for p in iter_dir(run, n).glob("t*") if p.is_dir() and p.name[1:].isdigit()),
+                  key=lambda p: int(p.name[1:]))
 
 
 def state(t):
@@ -196,14 +207,20 @@ def cmd_wait(a):
         time.sleep(15)
 
 
-def collect(ws, out, checks, trace=None):
+def collect(ws, out, checks, trace=None, base="HEAD"):
     out.mkdir(parents=True, exist_ok=True)
-    files = sh("git ls-files --others --cached --exclude-standard | grep -v '^.skill/' | head -400", cwd=ws).stdout
+    paths = ["--", ".", ":(exclude).skill"]
+    diff = sh(["git", "diff", "--name-status", base, *paths], cwd=ws)
+    untracked = sh(["git", "ls-files", "--others", "--exclude-standard", *paths], cwd=ws)
+    files = (diff.stdout if diff.returncode == 0 else "")
+    if untracked.returncode == 0:
+        files += "".join(f"??\t{path}\n" for path in untracked.stdout.splitlines())
     (out / "files.txt").write_text(files)
-    (out / "diffstat.txt").write_text(sh("git add -A -n . >/dev/null; git diff --stat HEAD; git status --short | head -200",
-                                         cwd=ws).stdout)
+    stat = sh(["git", "diff", "--stat", base, *paths], cwd=ws)
+    (out / "diffstat.txt").write_text(stat.stdout if stat.returncode == 0
+                                      else "No Git comparison available for this workspace.\n")
     if trace and trace.exists() and trace.stat().st_size:
-        r = sh([sys.executable, str(EXTRACT), str(trace), "-o", str(out / "trace.md"),
+        r = sh([sys.executable, str(EXTRACT), str(trace), "--compact", "-o", str(out / "trace.md"),
                 "--json", str(out / "trace.json")])
         if r.returncode:
             (out / "trace.md").write_text(f"could not parse trace: {r.stderr}")
@@ -225,18 +242,30 @@ def cmd_evidence(a):
     run = Path(a.run).resolve()
     cfg = load(run)
     checks = run / "checks.sh"
+    base = cfg["base"].get("ref", "HEAD")
     if a.reference:
         ws = Path(a.reference if isinstance(a.reference, str) else cfg["reference_workspace"])
-        rc = collect(ws, run / "reference" / "evidence", checks)
+        # A separately stored reference may not share the starting commit's history.
+        ref_base = base if sh(["git", "rev-parse", "--verify", f"{base}^{{commit}}"],
+                              cwd=ws).returncode == 0 else "HEAD"
+        rc = collect(ws, run / "reference" / "evidence", checks, base=ref_base)
         print(f"reference: checks exit {rc}  ->  {run}/reference/evidence")
         return
     n = a.iter or last_iter(run)
-    for t in trial_dirs(run, n):
-        rc = collect(t / "workspace", t / "evidence", checks, t / "trace" / "session.jsonl")
+    trials = trial_dirs(run, n)
+    if a.trial is not None:
+        trials = [t for t in trials if t.name == f"t{a.trial}"]
+        if not trials:
+            raise SystemExit(f"no trial {a.trial} in iteration {n}")
+    for t in trials:
+        recorded = t / "base.txt"
+        trial_base = recorded.read_text().strip() if recorded.exists() else base
+        rc = collect(t / "workspace", t / "evidence", checks, t / "trace" / "session.jsonl", trial_base)
         tj = t / "evidence" / "trace.json"
         s = json.loads(tj.read_text()) if tj.exists() else {}
         print(f"i{n:02d}/{t.name}: {state(t)}  checks exit {rc}  tool calls {s.get('tool_calls', '?')}  "
-              f"errors {s.get('tool_errors', '?')}  ->  {t}/evidence")
+              f"errors {s.get('tool_errors', '?')}  session errors {len(s.get('session_errors', []))}"
+              f"  ->  {t}/evidence")
 
 
 def ledger_add(run, row):
@@ -284,9 +313,13 @@ def cmd_report(a):
                        for p in imgs(ev))
         checks = (ev / "checks.log").read_text(errors="replace")[-3000:] if (ev / "checks.log").exists() else "(no checks.log)"
         files = (ev / "files.txt").read_text()[:3000] if (ev / "files.txt").exists() else ""
-        return (f"<section><h3>{e(title)}</h3>{extra}<div class=pics>{pics or '<p>(no screenshots)</p>'}</div>"
+        summary_file = ev / "summary.json"
+        status = json.loads(summary_file.read_text()).get("checks_exit") if summary_file.exists() else None
+        result = "No check result" if status is None else f"Checks exited {status}"
+        return (f"<section><h3>{e(title)}</h3>{extra}<p>{result}</p>"
+                f"<div class=pics>{pics or '<p>(no screenshots)</p>'}</div>"
                 f"<details><summary>checks.log</summary><pre>{e(checks)}</pre></details>"
-                f"<details><summary>files</summary><pre>{e(files)}</pre></details></section>")
+                f"<details><summary>changed files</summary><pre>{e(files)}</pre></details></section>")
 
     trials = []
     for t in trial_dirs(run, n):
@@ -349,10 +382,13 @@ def main():
     p.add_argument("--setup", help="shell command run in every fresh workspace before the student starts")
     p.add_argument("--tmux"); p.add_argument("--timeout-min", type=float, default=90)
     p.add_argument("--force", action="store_true")
-    p = sub.add_parser("trial"); p.add_argument("run"); p.add_argument("--iter", type=int); p.add_argument("-k", type=int, default=3)
+    p = sub.add_parser("trial"); p.add_argument("run"); p.add_argument("--iter", type=int)
+    p.add_argument("-k", type=int, default=1, help="number of new trials (default: 1)")
+    p.add_argument("--extend", action="store_true", help="append trials using the skill frozen for --iter")
     for c in ("status", "evidence", "report"):
         p = sub.add_parser(c); p.add_argument("run"); p.add_argument("--iter", type=int)
         if c == "evidence":
+            p.add_argument("--trial", type=int, help="collect evidence for just this trial number")
             p.add_argument("--reference", nargs="?", const=True, default=False,
                            help="collect evidence for the reference workspace instead")
     p = sub.add_parser("wait"); p.add_argument("run"); p.add_argument("--iter", type=int)
@@ -366,6 +402,10 @@ def main():
     p = sub.add_parser("accept"); p.add_argument("run"); p.add_argument("--iter", type=int, required=True)
     p.add_argument("--decision", required=True, choices=["pass", "fail"]); p.add_argument("--note")
     a = ap.parse_args()
+    if a.cmd == "trial" and a.k < 1:
+        ap.error("-k must be positive")
+    if a.cmd == "evidence" and a.reference and a.trial is not None:
+        ap.error("--reference and --trial are mutually exclusive")
     globals()["cmd_" + a.cmd](a)
 
 
