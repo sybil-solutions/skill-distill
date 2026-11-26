@@ -13,8 +13,10 @@ You do not stop at a draft. You test the skill on the student, look at what it a
 where the student went wrong, and test again. The **user** makes the final pass/fail call. Calling this
 skill on a session already tells you the user considers that session good.
 
-Everything deterministic is in `scripts/distill.py` (paths below are relative to this skill's folder).
-You do the parts that need judgement: what the skill says, and whether a trial matches.
+Use `scripts/distill.py` for the mechanical work (paths are relative to this skill's folder).
+Spend teacher context on the skill and on differences the checks cannot explain. Start with one trial
+per revision and agree on a teacher budget if the user specifies a ceiling. Check results when the
+runner exits. Polling traces or launching another teacher session to summarize them costs context.
 
 ## 0. Settle the inputs
 
@@ -48,8 +50,8 @@ python3 scripts/distill.py init runs/<task> \
 
 `runs/` holds private material (raw session logs, your machine's paths). Never commit it or publish it.
 
-Read `runs/<task>/reference/reference.md` all the way through, and look at the reference result itself:
-open it, run it, read the important files. The summary is a map, not the result.
+Start with `runs/<task>/reference/reference.md`, a short summary. Run the reference and inspect the specific
+files needed to understand the expected behavior. Search the original log for a specific decision if needed.
 
 ## 3. Write down what "as good" means
 
@@ -97,27 +99,30 @@ weaker than you, often has a shorter usable context, and follows text literally.
 ## 5. Run the student
 
 ```
-python3 scripts/distill.py trial runs/<task> -k 3        # iteration N, 3 trials in tmux
+python3 scripts/distill.py trial runs/<task>             # one trial in a new iteration
+python3 scripts/distill.py trial runs/<task> --iter N --extend -k 2 # confirm with the same frozen skill
 python3 scripts/distill.py status runs/<task>            # tmux attach -t distill-<task> to watch
 python3 scripts/distill.py wait runs/<task> --timeout 540 # repeat until all trials exit
 ```
 
 Each trial gets a fresh copy of the starting state, a frozen copy of the skill in `.skill/<name>/`, and the
-original prompt plus one line pointing at the skill. Nothing else. Use 3 trials per iteration: open models
-are noisy, and one lucky run proves nothing. Keep working while trials run (prepare the next checks,
-re-read the reference); check back every few minutes. Don't sit idle, and don't stop trials early unless
-they are clearly stuck (same error repeating for 10+ minutes); if you do, say so in the verdict.
+original prompt plus one line pointing at the skill. Nothing else. Revise after a clear failure from the
+first trial. When a version matches, extend that iteration with two fresh trials to check repeatability.
+Use `-k 3` when the user wants three upfront. Wait for the trial to finish before asking a teacher
+to review it. Stop a trial early only if it is clearly stuck, and record any interruption.
 
 ## 6. Judge each trial
 
 ```
-python3 scripts/distill.py evidence runs/<task>
+python3 scripts/distill.py evidence runs/<task> --iter N --trial K
 ```
 
-For each trial, read `evidence/trace.md` (what the student did), `evidence/checks.log`, and the screenshots,
-and open the result yourself when the checks can't capture it. Compare it item by item with `acceptance.md`
-and with the reference. Then find the **first divergence**: the earliest point where the student's path went
-wrong in a way that explains the gap. Fixing a later symptom usually fails. Record it:
+Use the check exit status, the changed-file list in `evidence/files.txt`, and the bounded `evidence/trace.md`
+first. For a failed check, read the relevant log excerpt and the files that explain it. For a passing check,
+inspect the acceptance criteria that still require judgement, including the rendered result where relevant.
+Use one review pass for the batch when possible. Search the raw trace for the **first divergence** only
+when the summary and diff leave it unclear. Reuse saved evidence when checks and workspaces are unchanged.
+Record the verdict:
 
 ```
 python3 scripts/distill.py verdict runs/<task> --iter N --trial K \
@@ -169,9 +174,9 @@ Make the changes for the failures you saw, in one edit, and say what each change
 Then start the next iteration (step 5).
 
 **When to stop looping:**
-- all 3 trials of an iteration are `match` → go to step 8;
-- 8 iterations, or 3 in a row with no improvement in the best score → stop, go to step 8 anyway, and tell
-  the user what the student still cannot do and what you tried. That is a useful result too.
+- Three trials using the same frozen skill are `match` → go to step 8.
+- At the user's teacher budget, 8 iterations, or 3 in a row without a higher best score, go to step 8
+  and report the remaining differences and the number of trials completed.
 
 ## 8. The user decides
 

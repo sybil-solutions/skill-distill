@@ -10,7 +10,7 @@ The teacher then loops:
 2. starts the student in tmux, on a fresh copy of the starting state, with the original prompt and the skill;
 3. compares what the student produced with what the reference produced;
 4. finds the first place the student went wrong and fixes the skill there;
-5. runs again, three trials per version, until the student matches the reference.
+5. revises with one trial at a time and repeats the matching version to check reliability.
 
 You make the final call: the teacher shows you the reference and the student's best results side by side,
 and the skill counts as done only when you accept it.
@@ -44,7 +44,7 @@ students work with `tmux attach -t distill-<task>`.
 |---|---|
 | `skills/skill-distill/SKILL.md` | the loop the teacher follows |
 | `skills/skill-distill/scripts/distill.py` | run bookkeeping: `init`, `trial`, `status`, `wait`, `evidence`, `verdict`, `ledger`, `report`, `accept` |
-| `skills/skill-distill/scripts/extract_session.py` | Claude Code / Codex / omp session log → readable reference (drops system and AGENTS.md text) |
+| `skills/skill-distill/scripts/extract_session.py` | Claude Code, Codex, omp and OpenCode logs → readable summaries |
 | `skills/skill-distill/scripts/capture_web.py` | serve a web app, drive it in headless Chromium, save screenshots and errors |
 | `skills/skill-distill/adapters/` | one script per student harness: omp, pi, Codex, Claude Code, opencode |
 | `skills/skill-distill/templates/student-skill/` | the starting shape of a produced skill |
@@ -56,7 +56,9 @@ students work with `tmux attach -t distill-<task>`.
   the student harness's own global context files and skills are turned off where the harness allows it.
 - The skill may not contain the reference's finished output or a script that writes it. It teaches the
   steps, decisions, traps and checks; short snippets only where the student can't get a part right otherwise.
-- Three trials per skill version. One lucky run proves nothing.
+- One trial per revision by default. After a match, add two trials with `trial --iter N --extend -k 2`.
+- Start review with saved check results, changed files and bounded trace summaries. Keep full traces
+  available for targeted investigation.
 - Checks are tested on the reference first. A check that fails on the reference is a broken check.
 - Raw session logs stay in `runs/`, which is git-ignored: they contain your machine's paths and context.
 
@@ -68,7 +70,7 @@ students work with `tmux attach -t distill-<task>`.
 | Codex CLI | tested as the teacher; as a student needs a provider in `STUDENT_ARGS` |
 | Claude Code | written; open models need `ANTHROPIC_BASE_URL` to an Anthropic-compatible server |
 | pi | written, untested |
-| opencode | written, untested; its JSON log has no parser in `extract_session.py` yet |
+| opencode | headless JSON trace supported |
 
 ## License
 

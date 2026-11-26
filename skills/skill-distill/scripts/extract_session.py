@@ -6,6 +6,7 @@ Supported logs (auto-detected):
   codex       Codex rollout            ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
   codex-exec  `codex exec --json` stdout
   omp         oh-my-pi / pi session    ~/.omp/agent/sessions/<slug>/*.jsonl
+  opencode    `opencode run --format json` stdout
 
 Usage:
   extract_session.py LOG [-o reference.md] [--json reference.json]
@@ -39,13 +40,14 @@ def clean_user(text):
 
 def read_jsonl(path):
     out = []
-    for line in open(path, encoding="utf-8", errors="replace"):
-        line = line.strip()
-        if line:
+    with open(path, encoding="utf-8", errors="replace") as log:
+        for line in log:
             try:
-                out.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError:
-                pass
+                continue
+            if isinstance(row, dict):
+                out.append(row)
     return out
 
 
@@ -60,6 +62,8 @@ def detect(rows):
             return "omp"
         if t in ("user", "assistant") and "message" in o:
             return "claude"
+        if "sessionID" in o and t in ("step_start", "step_finish", "tool_use", "text", "error", "retry"):
+            return "opencode"
     raise SystemExit("unknown session format")
 
 
@@ -171,7 +175,25 @@ def parse_omp(rows):
             yield ("result", text_of(m.get("content")), bool(m.get("isError")))
 
 
-PARSERS = {"claude": parse_claude, "codex": parse_codex, "codex-exec": parse_codex_exec, "omp": parse_omp}
+def parse_opencode(rows):
+    for row in rows:
+        part = row.get("part") or {}
+        kind = row.get("type")
+        if kind == "text" and part.get("text", "").strip():
+            yield ("assistant", part["text"])
+        elif kind == "tool_use":
+            state = part.get("state") or {}
+            yield ("tool", part.get("tool"), state.get("input"))
+            failed = state.get("status") == "error"
+            yield ("result", (state.get("error") if failed else state.get("output")) or "", failed)
+        elif kind == "error":
+            error = row.get("error") or {}
+            message = error.get("message") or error.get("type") if isinstance(error, dict) else error
+            yield ("session_error", message or "Unknown OpenCode error")
+
+
+PARSERS = {"claude": parse_claude, "codex": parse_codex, "codex-exec": parse_codex_exec,
+           "omp": parse_omp, "opencode": parse_opencode}
 
 PATH_KEYS = ("file_path", "path", "filePath", "notebook_path")
 
@@ -197,7 +219,7 @@ def summarize(path, fmt=None):
     events = list(PARSERS[fmt](rows))
     task = next((e[1] for e in events if e[0] == "user"), "")
     finals = [e[1] for e in events if e[0] == "assistant"]
-    steps, files, n_tools, n_err = [], set(), 0, 0
+    steps, failures, session_errors, files, n_tools, n_err = [], [], [], set(), 0, 0
     for e in events:
         if e[0] == "user" and e[1] != task:
             steps.append(f"**user:** {clip(e[1], 1500)}")
@@ -215,16 +237,24 @@ def summarize(path, fmt=None):
                 n_err += 1
             if steps:
                 steps[-1] += f"\n    → {'ERROR ' if e[2] else ''}{clip(e[1] or '', CLIP_OUT)}"
+                if e[2]:
+                    failures.append((len(steps), clip(e[1] or "", CLIP_OUT)))
+        elif e[0] == "session_error":
+            session_errors.append(clip(e[1], CLIP_OUT))
+            steps.append(f"**Session error:** {session_errors[-1]}")
     return {
         "source": str(path), "format": fmt, "task": task,
         "final": finals[-1] if finals else "",
         "user_turns": sum(1 for e in events if e[0] == "user"),
         "tool_calls": n_tools, "tool_errors": n_err,
-        "files_written": sorted(files), "steps": steps,
+        "files_written": sorted(files), "steps": steps, "failures": failures,
+        "session_errors": session_errors,
     }
 
 
-def to_markdown(s):
+def to_markdown(s, compact=False):
+    if compact:
+        return compact_markdown(s)
     out = [f"# Session reference ({s['format']})", "",
            f"tool calls: {s['tool_calls']} · tool errors: {s['tool_errors']} · user turns: {s['user_turns']}", "",
            "## Task (first user message)", "", s["task"], "",
@@ -232,6 +262,28 @@ def to_markdown(s):
            "## Files written", ""] + [f"- {f}" for f in s["files_written"]] + ["", "## Steps", ""]
     out += [f"{i + 1}. {st}" for i, st in enumerate(s["steps"])]
     return "\n".join(out) + "\n"
+
+
+def compact_markdown(s):
+    files = s["files_written"]
+    steps = s["steps"]
+    lines = [
+        f"# Session summary ({s['format']})",
+        f"{s['tool_calls']} tool calls · {s['tool_errors']} tool errors · "
+        f"{len(s['session_errors'])} session errors",
+        f"\n## Final response (excerpt)\n\n{clip(s['final'], 600)}",
+        f"\n## Files reported by tools ({len(files)})",
+        *[f"- {clip(path, 120)}" for path in files[:12]],
+        "\n## First tool failures",
+        *[f"- Step {index}: {clip(error, 180)}" for index, error in s["failures"][:3]],
+        "\n## Session errors",
+        *[f"- {clip(error, 180)}" for error in s["session_errors"][-3:]],
+        "\n## Last steps",
+        *[f"- Step {i}: {clip(step.splitlines()[0], 160)}"
+          for i, step in enumerate(steps[-5:], max(1, len(steps) - 4))],
+        f"\nFull trace: {s['source']}. Use it only for a specific unresolved question.",
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def current(kind, cwd):
@@ -270,6 +322,7 @@ def main():
     ap.add_argument("--current", choices=["claude", "codex", "omp"])
     ap.add_argument("--cwd", default=os.getcwd())
     ap.add_argument("--format", choices=list(PARSERS))
+    ap.add_argument("--compact", action="store_true", help="write a bounded summary for review")
     ap.add_argument("-o", "--out")
     ap.add_argument("--json")
     a = ap.parse_args()
@@ -277,7 +330,7 @@ def main():
     if not log:
         ap.error("give LOG or --current")
     s = summarize(log, a.format)
-    md = to_markdown(s)
+    md = to_markdown(s, compact=a.compact)
     if a.out:
         Path(a.out).write_text(md)
         print(f"wrote {a.out} ({s['tool_calls']} tool calls, {len(s['files_written'])} files) from {log}")
